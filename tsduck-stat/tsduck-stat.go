@@ -10,6 +10,7 @@ import (
     "regexp"
     "strconv"
     "io/ioutil"
+    "io"
 )
 
 
@@ -28,6 +29,8 @@ var bitrateAgg1Avg int64 = 0 //average bitrate (interval 1)
 var bitrateAgg2Avg int64 = 0 //average bitrate (interval 2)
 var missingPackets int64 = 0 //total missing TS packets
 var ccErrorSeconds int64 = 0 //total seconds with CC errors
+var ccte35oont int64 = 0 //total scte-35 splice_insert messages with out_of_network=true
+var ccte35oonf int64 = 0 //total scte-35 splice_insert messages with out_of_network=false
 
 
 func main() {
@@ -52,14 +55,17 @@ func main() {
     var bitrateAgg2Secs int64 = 0 //seconds for bitrate aggregation 2
 
     mcastGroup := os.Args[1]
-    args := "--realtime -t -I ip -b 8388608 "+mcastGroup+" -O drop -P continuity -P bitrate_monitor -p 1 -t 1"
+    //SCTE 35 2019 (section 9.6.1): table_id – This is an 8-bit field. Its value shall be 0xFC
+    args := "--realtime -t -I ip -b 8388608 "+mcastGroup+" -O drop -P continuity -P tables -f --xml-output - --tid 0xFC -P bitrate_monitor -p 1 -t 1"
     cmd := exec.Command("tsp", strings.Split(args, " ")...)
 
     stderr, _ := cmd.StderrPipe()
+    stdout, _ := cmd.StdoutPipe()
     cmd.Start()
 
     //go uptimeThread()
     go writeThread(mcastGroup)
+    go stdoutReader(stdout)
 
     scanner := bufio.NewScanner(stderr)
     scanner.Split(bufio.ScanLines)
@@ -134,6 +140,33 @@ func check(e error) {
     }
 }
 
+func stdoutReader(stdout io.ReadCloser) {
+    scanner := bufio.NewScanner(stdout)
+    scanner.Split(bufio.ScanLines)
+
+    //line example:    <splice_insert splice_event_id="0x400004F6" splice_event_cancel="false" out_of_network="true" \
+    //              splice_immediate="false" unique_program_id="0x0001" avail_num="0" avails_expected="0" pts_time="5,326,199,179">
+
+    regexp1 := regexp.MustCompile(`<splice_insert.*out_of_network="(true|false)"`) //extract out_of_network value [1]
+    
+    for scanner.Scan() {
+        //line := scanner.Text()
+        parts := regexp1.FindStringSubmatch(scanner.Text())
+        if(len(parts)!=2) {
+            continue
+        }
+        switch parts[1] { //check out_of_network value
+            case "true":
+		ccte35oont++
+	    case "false":
+		ccte35oonf++
+	    default:
+		continue
+	}
+	fmt.Println(parts)
+    }
+}
+
 func writeThread(mcastGroup string) {
     start := time.Now() //start time for uptime calculation
     var lowBitrateSecsLast int64 = -1
@@ -142,6 +175,8 @@ func writeThread(mcastGroup string) {
     var bitrateAgg2AvgLast int64 = -1
     var ccErrorSecondsLast int64 = -1
     var missingPacketsLast int64 = -1
+    var ccte35oontLast int64 = -1
+    var ccte35oonfLast int64 = -1
 
     var fileMode os.FileMode = 0644
 
@@ -159,7 +194,10 @@ func writeThread(mcastGroup string) {
     ccErrorSecondsFileTmp := workDir+"/cc_secs_"+mcastGroup+"_tmp"
     missingPacketsFile := workDir+"/cc_miss_"+mcastGroup
     missingPacketsFileTmp := workDir+"/cc_miss_"+mcastGroup+"_tmp"
-
+    ccte35oontFile := workDir+"/ccte35_oont_"+mcastGroup
+    ccte35oontFileTmp := workDir+"/cct35_oont_"+mcastGroup+"_tmp"
+    ccte35oonfFile := workDir+"/ccte35_oonf_"+mcastGroup
+    ccte35oonfFileTmp := workDir+"/cct35_oonf_"+mcastGroup+"_tmp"
 
     for {
         uptime := time.Since(start).Nanoseconds()/1e6
@@ -169,6 +207,24 @@ func writeThread(mcastGroup string) {
         check(err)
         err2 := os.Rename(uptimeFileTmp, uptimeFile)
         check(err2)
+
+        if(ccte35oontLast != ccte35oont) {
+            ccte35oontWr := ccte35oont
+            err13 := ioutil.WriteFile(ccte35oontFileTmp, []byte(strconv.FormatInt(ccte35oontWr, 10)), fileMode)
+            check(err13)
+            err14 := os.Rename(ccte35oontFileTmp, ccte35oontFile)
+            check(err14)
+            ccte35oontLast=ccte35oontWr
+        }
+
+        if(ccte35oonfLast != ccte35oonf) {
+            ccte35oonfWr := ccte35oonf
+            err15 := ioutil.WriteFile(ccte35oonfFileTmp, []byte(strconv.FormatInt(ccte35oonfWr, 10)), fileMode)
+            check(err15)
+            err16 := os.Rename(ccte35oonfFileTmp, ccte35oonfFile)
+            check(err16)
+            ccte35oonfLast=ccte35oonfWr
+        }
 
         if(ccErrorSecondsLast != ccErrorSeconds) {
             ccErrorSecondsWr := ccErrorSeconds
